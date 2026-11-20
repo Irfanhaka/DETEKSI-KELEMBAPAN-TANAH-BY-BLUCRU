@@ -1,0 +1,317 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
+#include <PubSubClient.h>
+
+// =================================
+// 1. KONFIGURASI WIFI
+// =================================
+const char* ssid = "Redmi Note 11";
+const char* password = "12345678";
+
+// =================================
+// 2. KONFIGURASI THINGSPEAK (HTTP)
+// =================================
+const char* writeAPIKey = "GANTI_DENGAN_API_KEY_BARU";
+
+const char* server =
+  "http://api.thingspeak.com/update";
+
+WiFiClient httpClient;
+
+// =================================
+// 3. KONFIGURASI MQTT
+// =================================
+const char* mqtt_server = "broker.hivemq.com";
+const int mqtt_port = 1883;
+
+const char* mqtt_topic = "gayuh/soilmoisture";
+
+WiFiClient mqttWifiClient;
+PubSubClient mqttClient(mqttWifiClient);
+
+// =================================
+// 4. KONFIGURASI SENSOR
+// =================================
+#define SOIL_PIN A0
+
+const int ADC_DRY = 800;
+const int ADC_WET = 350;
+
+unsigned long waktuTerakhir = 0;
+const unsigned long interval = 20000;
+
+int nomorKejadian = 0;
+
+// =================================
+// 5. MENGHITUNG KELEMBAPAN
+// =================================
+float hitungKelembapan(int adc) {
+
+  float persen =
+    ((float)(ADC_DRY - adc) /
+    (ADC_DRY - ADC_WET)) * 100.0;
+
+  return constrain(persen, 0, 100);
+}
+
+// =================================
+// 6. KLASIFIKASI TANAH
+// =================================
+String klasifikasi(float persen) {
+
+  if (persen <= 33) {
+    return "KERING";
+  }
+  else if (persen <= 66) {
+    return "NORMAL";
+  }
+  else {
+    return "BASAH";
+  }
+}
+
+// =================================
+// 7. KONEKSI WIFI
+// =================================
+void hubungkanWiFi() {
+
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
+  Serial.println("Menghubungkan WiFi...");
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi berhasil terhubung!");
+
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// =================================
+// 8. KONEKSI MQTT
+// =================================
+void hubungkanMQTT() {
+
+  if (mqttClient.connected()) {
+    return;
+  }
+
+  Serial.println("Menghubungkan MQTT...");
+
+  String clientId =
+    "ESP8266-Soil-" + String(ESP.getChipId(), HEX);
+
+  if (mqttClient.connect(clientId.c_str())) {
+
+    Serial.println("MQTT berhasil terhubung!");
+
+  }
+  else {
+
+    Serial.print("MQTT gagal terhubung. State: ");
+    Serial.println(mqttClient.state());
+
+  }
+}
+
+// =================================
+// 9. KIRIM DATA MQTT
+// =================================
+void kirimMQTT(
+  float kelembapan,
+  String kondisi
+) {
+
+  if (!mqttClient.connected()) {
+    hubungkanMQTT();
+  }
+
+  if (mqttClient.connected()) {
+
+    String pesan =
+      String(kelembapan, 2) + "," + kondisi;
+
+    bool berhasil = mqttClient.publish(
+      mqtt_topic,
+      pesan.c_str()
+    );
+
+    if (berhasil) {
+      Serial.println("--- MQTT ---");
+      Serial.print("Topic: ");
+      Serial.println(mqtt_topic);
+
+      Serial.print("Pesan: ");
+      Serial.println(pesan);
+
+      Serial.println("MQTT berhasil dikirim!");
+    }
+    else {
+      Serial.println("Pengiriman MQTT gagal!");
+    }
+
+  }
+  else {
+    Serial.println("MQTT belum terhubung!");
+  }
+}
+
+// =================================
+// 10. KIRIM DATA HTTP THINGSPEAK
+// =================================
+void kirimThingSpeak(
+  float kelembapan,
+  String kondisi
+) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi terputus!");
+    return;
+  }
+
+  HTTPClient http;
+
+  if (!http.begin(httpClient, server)) {
+    Serial.println("Koneksi HTTP gagal!");
+    return;
+  }
+
+  http.addHeader(
+    "Content-Type",
+    "application/x-www-form-urlencoded"
+  );
+
+  String data =
+    "api_key=" + String(writeAPIKey);
+
+  if (kondisi == "KERING") {
+    data += "&field1=" + String(kelembapan, 2);
+  }
+  else if (kondisi == "BASAH") {
+    data += "&field2=" + String(kelembapan, 2);
+  }
+  else if (kondisi == "NORMAL") {
+    data += "&field3=" + String(kelembapan, 2);
+  }
+
+  int httpCode = http.POST(data);
+
+  Serial.println();
+  Serial.println("--- THINGSPEAK HTTP ---");
+
+  Serial.print("HTTP Code: ");
+  Serial.println(httpCode);
+
+  if (httpCode == 200) {
+
+    String response = http.getString();
+
+    Serial.print("Entry ID: ");
+    Serial.println(response);
+
+    if (response.toInt() > 0) {
+      Serial.println("DATA BERHASIL DIKIRIM!");
+    }
+    else {
+      Serial.println("DATA GAGAL DISIMPAN!");
+    }
+
+  }
+  else {
+    Serial.println("Pengiriman HTTP gagal!");
+  }
+
+  http.end();
+}
+
+// =================================
+// 11. SETUP
+// =================================
+void setup() {
+
+  Serial.begin(115200);
+
+  Serial.println();
+  Serial.println("==============================");
+  Serial.println("SOIL MOISTURE MONITORING");
+  Serial.println("NODEMCU ESP8266");
+  Serial.println("HTTP + MQTT");
+  Serial.println("==============================");
+
+  hubungkanWiFi();
+
+  // Konfigurasi MQTT
+  mqttClient.setServer(mqtt_server, mqtt_port);
+
+  hubungkanMQTT();
+
+  // Pengiriman pertama langsung dilakukan
+  waktuTerakhir = millis() - interval;
+}
+
+// =================================
+// 12. LOOP
+// =================================
+void loop() {
+
+  hubungkanWiFi();
+
+  if (!mqttClient.connected()) {
+    hubungkanMQTT();
+  }
+
+  mqttClient.loop();
+
+  unsigned long sekarang = millis();
+
+  if (sekarang - waktuTerakhir >= interval) {
+
+    waktuTerakhir = sekarang;
+
+    int nilaiADC = analogRead(SOIL_PIN);
+
+    float kelembapan =
+      hitungKelembapan(nilaiADC);
+
+    String kondisi =
+      klasifikasi(kelembapan);
+
+    nomorKejadian++;
+
+    Serial.println();
+    Serial.println("==============================");
+
+    Serial.print("PENGUJIAN KE-");
+    Serial.println(nomorKejadian);
+
+    Serial.print("KELEMBAPAN: ");
+    Serial.print(kelembapan, 2);
+    Serial.println("%");
+
+    Serial.print("KONDISI TANAH: ");
+    Serial.println(kondisi);
+
+    // Pengiriman HTTP
+    kirimThingSpeak(
+      kelembapan,
+      kondisi
+    );
+
+    // Pengiriman MQTT
+    kirimMQTT(
+      kelembapan,
+      kondisi
+    );
+
+    Serial.println("==============================");
+  }
+}
